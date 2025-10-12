@@ -15,3 +15,5 @@ TASK [unificontroller : Ensure UniFi data directory exists with correct permissi
 changed: [unificontroller]
 
 - Add a task/role to update all docker compose stacks?
+
+- Dang I realised I left the CDN role html template personalized, gotta fix that too
