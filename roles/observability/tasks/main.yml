@@ -1,0 +1,380 @@
+---
+- name: Install required packages for Docker repository
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+      - python3-requests
+    state: present
+    update_cache: true
+  become: true
+
+- name: Create directory for Docker GPG key
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Add Docker GPG key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/debian/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: '0644'
+  become: true
+
+- name: Set Docker GPG key permissions
+  ansible.builtin.file:
+    path: /etc/apt/keyrings/docker.asc
+    mode: '0644'
+    owner: root
+    group: root
+  become: true
+
+- name: Get system architecture
+  ansible.builtin.command: dpkg --print-architecture
+  register: system_arch
+  changed_when: false
+
+- name: Add Docker repository
+  ansible.builtin.apt_repository:
+    repo: "deb [arch={{ system_arch.stdout }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable"
+    state: present
+    filename: docker
+  become: true
+
+- name: Install Docker and Docker Compose plugin
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-compose-plugin
+    state: present
+    update_cache: true
+  become: true
+
+- name: Ensure Docker service is running
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+  become: true
+
+- name: Create monitoring directories
+  ansible.builtin.file:
+    path: "{{ directory_item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /etc/monitoring
+    - /etc/monitoring/prometheus
+    - /etc/monitoring/grafana
+    - /etc/monitoring/grafana/dashboards
+    - /etc/monitoring/grafana/provisioning
+    - /etc/monitoring/grafana/provisioning/dashboards
+    - /etc/monitoring/grafana/provisioning/datasources
+    - /var/lib/prometheus
+    - /var/lib/grafana
+  loop_control:
+    loop_var: directory_item
+  become: true
+
+# =============================================================================
+# MONITORING MANAGEMENT STATE CHECK
+# =============================================================================
+
+- name: Check if monitoring is already managed by Ansible
+  ansible.builtin.stat:
+    path: /etc/monitoring/.ansible_managed
+  register: monitoring_managed
+
+# =============================================================================
+# NAS MOUNTING AND BACKUP DISCOVERY (FIRST TIME ONLY)
+# =============================================================================
+
+- name: Create NAS mount point for monitoring
+  ansible.builtin.file:
+    path: /mnt/monitoring_data
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+  when: not monitoring_managed.stat.exists
+
+- name: Load NAS credentials
+  ansible.builtin.include_vars:
+    file: "{{ playbook_dir }}/credentials/nas_creds.txt"
+
+- name: Mount NAS for initial setup (first time only)
+  ansible.posix.mount:
+    path: /mnt/monitoring_data
+    src: "//{{ nas_ip }}/tank/Server/monitoring"
+    fstype: cifs
+    opts: "username={{ nas_user }},password={{ nas_password }},uid=0,gid=0,iocharset=utf8,vers=3.0"
+    state: mounted
+  when: not monitoring_managed.stat.exists
+
+- name: Check for latest Grafana backup on NAS (first time only)
+  ansible.builtin.shell: |
+    if [ -d "/mnt/monitoring_data/backups/grafana" ]; then
+      ls -t /mnt/monitoring_data/backups/grafana/grafana_backup_*.tar.gz 2>/dev/null | head -n1 || echo ""
+    else
+      echo ""
+    fi
+  register: latest_grafana_backup
+  when: not monitoring_managed.stat.exists
+  changed_when: false
+
+- name: Check for latest Prometheus backup on NAS (first time only)
+  ansible.builtin.shell: |
+    if [ -d "/mnt/monitoring_data/backups/prometheus" ]; then
+      ls -t /mnt/monitoring_data/backups/prometheus/prometheus_backup_*.tar.gz 2>/dev/null | head -n1 || echo ""
+    else
+      echo ""
+    fi
+  register: latest_prometheus_backup
+  when: not monitoring_managed.stat.exists
+  changed_when: false
+
+- name: Debug backup discovery
+  ansible.builtin.debug:
+    msg: 
+      - "Monitoring managed: {{ monitoring_managed.stat.exists }}"
+      - "Latest Grafana backup: '{{ latest_grafana_backup.stdout | default('') }}'"
+      - "Latest Prometheus backup: '{{ latest_prometheus_backup.stdout | default('') }}'"
+      - "Force fresh install: {{ monitoring_force_fresh_install | default(false) }}"
+  when: not monitoring_managed.stat.exists
+
+- name: Set restoration facts
+  ansible.builtin.set_fact:
+    should_restore_grafana: "{{ not monitoring_managed.stat.exists and latest_grafana_backup.stdout != '' and not (monitoring_force_fresh_install | default(false)) }}"
+    should_restore_prometheus: "{{ not monitoring_managed.stat.exists and latest_prometheus_backup.stdout != '' and not (monitoring_force_fresh_install | default(false)) }}"
+    is_fresh_monitoring_install: "{{ monitoring_force_fresh_install | default(false) or (not monitoring_managed.stat.exists and latest_grafana_backup.stdout == '' and latest_prometheus_backup.stdout == '') }}"
+  when: not monitoring_managed.stat.exists
+
+- name: Debug restoration decisions
+  ansible.builtin.debug:
+    msg:
+      - "Will restore Grafana: {{ should_restore_grafana | default(false) }}"
+      - "Will restore Prometheus: {{ should_restore_prometheus | default(false) }}"
+      - "Fresh install: {{ is_fresh_monitoring_install | default(false) }}"
+  when: not monitoring_managed.stat.exists
+
+# =============================================================================
+# DATA RESTORATION (BEFORE STARTING SERVICES)
+# =============================================================================
+
+- name: Restore Grafana data from backup (first time setup)
+  ansible.builtin.shell: |
+    set -e
+    backup_file="{{ latest_grafana_backup.stdout }}"
+    
+    if [ ! -f "$backup_file" ]; then
+      echo "ERROR: Grafana backup file does not exist: $backup_file"
+      exit 1
+    fi
+    
+    # Stop services if running
+    docker stop grafana || true
+    
+    # Clear existing data
+    rm -rf /var/lib/grafana/*
+    
+    # Extract backup
+    tar -xzf "$backup_file" -C /var/lib/grafana --strip-components=1
+    
+    echo "Grafana data restored successfully"
+  when: should_restore_grafana | default(false)
+  register: grafana_restore_result
+
+- name: Restore Prometheus data from backup (first time setup)
+  ansible.builtin.shell: |
+    set -e
+    backup_file="{{ latest_prometheus_backup.stdout }}"
+    
+    if [ ! -f "$backup_file" ]; then
+      echo "ERROR: Prometheus backup file does not exist: $backup_file"
+      exit 1
+    fi
+    
+    # Stop services if running
+    docker stop prometheus || true
+    
+    # Clear existing data
+    rm -rf /var/lib/prometheus/*
+    
+    # Extract backup
+    tar -xzf "$backup_file" -C /var/lib/prometheus --strip-components=1
+    
+    echo "Prometheus data restored successfully"
+  when: should_restore_prometheus | default(false)
+  register: prometheus_restore_result
+
+- name: Set ownership for Grafana directory
+  ansible.builtin.file:
+    path: /var/lib/grafana
+    owner: 472
+    group: 472
+    recurse: true
+  become: true
+
+- name: Set ownership for Prometheus directory
+  ansible.builtin.file:
+    path: /var/lib/prometheus
+    owner: 65534
+    group: 65534
+    recurse: true
+  become: true
+
+- name: Generate monitoring credentials
+  ansible.builtin.set_fact:
+    grafana_admin_password: "{{ lookup('ansible.builtin.password',
+                                playbook_dir + '/credentials/hosts/' + inventory_hostname + '/grafana_admin_password.txt' +
+                                ' chars=ascii_letters,digits length=32') }}"
+
+- name: Configure Prometheus
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: /etc/monitoring/prometheus/prometheus.yml
+    mode: '0644'
+  become: true
+  register: prometheus_config
+  notify: Restart monitoring stack
+
+- name: Configure Grafana datasource
+  ansible.builtin.template:
+    src: datasource.yml.j2
+    dest: /etc/monitoring/grafana/provisioning/datasources/prometheus.yml
+    mode: '0644'
+  become: true
+  register: grafana_datasource
+  notify: Restart monitoring stack
+
+- name: Configure Grafana dashboard provisioning
+  ansible.builtin.template:
+    src: dashboard-provider.yml.j2
+    dest: /etc/monitoring/grafana/provisioning/dashboards/default.yml
+    mode: '0644'
+  become: true
+  register: grafana_dashboard_config
+  notify: Restart monitoring stack
+
+- name: Copy docker-compose.yml for monitoring stack
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: /etc/monitoring/docker-compose.yml
+    mode: '0644'
+  become: true
+  register: compose_result
+
+- name: Check if monitoring containers exist
+  community.docker.docker_container_info:
+    name: "{{ container_name }}"
+  register: monitoring_containers
+  loop:
+    - prometheus
+    - grafana
+  loop_control:
+    loop_var: container_name
+  become: true
+
+- name: Start monitoring stack
+  community.docker.docker_compose_v2:
+    project_src: /etc/monitoring
+    state: present
+    pull: "always"
+  become: true
+  when: >
+    prometheus_config.changed or
+    grafana_datasource.changed or
+    grafana_dashboard_config.changed or
+    compose_result.changed or
+    monitoring_containers.results | selectattr('exists', 'equalto', false) | list | length > 0
+
+# =============================================================================
+# BACKUP SYSTEM SETUP
+# =============================================================================
+
+- name: Create monitoring backup script directory
+  ansible.builtin.file:
+    path: /opt/monitoring/scripts
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+
+- name: Create monitoring backup script
+  ansible.builtin.template:
+    src: monitoring-backup.sh.j2
+    dest: /opt/monitoring/scripts/monitoring-backup.sh
+    mode: '0755'
+    owner: root
+    group: root
+
+- name: Add NAS mount to fstab for monitoring backups
+  ansible.posix.mount:
+    path: /mnt/monitoring_data
+    src: "//{{ nas_ip }}/tank/Server/monitoring"
+    fstype: cifs
+    opts: "username={{ nas_user }},password={{ nas_password }},uid=0,gid=0,iocharset=utf8,vers=3.0,noauto"
+    boot: false
+    state: present
+
+- name: Create monitoring backup cron job
+  ansible.builtin.cron:
+    name: "Monitoring daily backup to NAS"
+    minute: "30"
+    hour: "2"
+    job: "/opt/monitoring/scripts/monitoring-backup.sh > /var/log/monitoring-backup.log 2>&1"
+    user: root
+
+- name: Create monitoring backup log rotation
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/monitoring-backup
+    content: |
+      /var/log/monitoring-backup.log {
+          daily
+          rotate 7
+          compress
+          delaycompress
+          missingok
+          notifempty
+          create 0644 root root
+      }
+    mode: '0644'
+
+# =============================================================================
+# CLEANUP AND FINALIZATION
+# =============================================================================
+
+- name: Mark monitoring as Ansible managed
+  ansible.builtin.copy:
+    content: "Monitoring managed by Ansible on {{ ansible_date_time.iso8601 }}"
+    dest: /etc/monitoring/.ansible_managed
+    owner: root
+    group: root
+    mode: '0644'
+    force: no
+
+- name: Unmount NAS (cleanup after initial setup)
+  ansible.posix.mount:
+    path: /mnt/monitoring_data
+    state: unmounted
+  when: not monitoring_managed.stat.exists
+
+- name: Allow Prometheus HTTP
+  community.general.ufw:
+    rule: allow
+    port: 9090
+    proto: tcp
+  notify: Reload ufw
+
+- name: Allow Grafana HTTP
+  community.general.ufw:
+    rule: allow
+    port: 80
+    proto: tcp
+  notify: Reload ufw

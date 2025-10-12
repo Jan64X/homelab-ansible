@@ -1,0 +1,127 @@
+---
+- name: Install required packages
+  ansible.builtin.apt:
+    name:
+      - cifs-utils
+      - python3
+      - python3-argon2
+      - libcap2-bin
+      - nginx
+      - netcat-openbsd
+    state: present
+    update_cache: true
+
+- name: Create filescdn directories
+  ansible.builtin.file:
+    path: "{{ directory }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /mnt/filescdn
+    - /etc/nginx/sites-available
+    - /etc/nginx/sites-enabled
+    - /var/www/cdn
+  loop_control:
+    loop_var: directory
+
+- name: Load NAS credentials
+  ansible.builtin.include_vars:
+    file: "{{ playbook_dir }}/credentials/nas_creds.txt"
+
+- name: Create systemd NAS credentials file
+  ansible.builtin.copy:
+    content: |
+      username={{ nas_user }}
+      password={{ nas_password }}
+    dest: /etc/filescdn-nas-credentials
+    mode: '0600'
+    owner: root
+    group: root
+
+- name: Create wait-for-nas systemd service
+  ansible.builtin.template:
+    src: wait-for-nas.service.j2
+    dest: /etc/systemd/system/wait-for-nas.service
+    mode: '0644'
+    owner: root
+    group: root
+
+- name: Create systemd mount unit for NAS
+  ansible.builtin.template:
+    src: mntcdnfiles.mount.j2
+    dest: /etc/systemd/system/mnt-filescdn.mount
+    mode: '0644'
+    owner: root
+    group: root
+  notify: Reload systemd
+
+- name: Enable wait-for-nas service
+  ansible.builtin.systemd:
+    name: wait-for-nas.service
+    enabled: yes
+    daemon_reload: yes
+
+- name: Enable and start NAS mount
+  ansible.builtin.systemd:
+    name: mnt-filescdn.mount
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Configure nginx for filescdn
+  ansible.builtin.template:
+    src: nginx-filescdn.conf.j2
+    dest: /etc/nginx/sites-available/filescdn.conf
+    mode: '0644'
+  notify: Restart nginx
+
+- name: Enable nginx site
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/filescdn.conf
+    dest: /etc/nginx/sites-enabled/filescdn.conf
+    state: link
+  notify: Restart nginx
+
+- name: Remove default nginx site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Restart nginx
+
+- name: Deploy custom index.html
+  ansible.builtin.template:
+    src: index.html
+    dest: /var/www/cdn/index.html
+    mode: '0644'
+    owner: root
+    group: root
+
+- name: Stop and disable default nginx service
+  ansible.builtin.systemd:
+    name: nginx
+    state: stopped
+    enabled: no
+
+- name: Create custom nginx systemd service for filescdn
+  ansible.builtin.template:
+    src: nginx-filescdn.service.j2
+    dest: /etc/systemd/system/nginx-filescdn.service
+    mode: '0644'
+    owner: root
+    group: root
+  notify: Reload systemd
+
+- name: Enable and start custom nginx service
+  ansible.builtin.systemd:
+    name: nginx-filescdn.service
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Allow nginx port 8080
+  community.general.ufw:
+    rule: allow
+    port: 8080
+    proto: tcp
+  notify: Reload ufw
+

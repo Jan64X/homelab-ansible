@@ -1,0 +1,25 @@
+[Unit]
+Description=Navidrome music server
+
+# This service now only needs to wait for the mount to be ready.
+# The mount unit itself is already waiting for the network, creating the chain.
+Requires=mnt-music.mount
+After=mnt-music.mount
+BindsTo=mnt-music.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/navidrome
+# No need for ExecStartPre, as the Requires= directive guarantees the mount exists.
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+ExecStop=/usr/bin/docker compose down
+ExecReload=/usr/bin/docker compose pull
+ExecReload=/usr/bin/docker compose up -d --remove-orphans
+TimeoutStartSec=300
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

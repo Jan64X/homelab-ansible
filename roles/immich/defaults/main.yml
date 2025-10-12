@@ -1,0 +1,15 @@
+---
+# Default variables for immich role
+
+# Timezone for immich (override in group_vars or host_vars if needed)
+immich_timezone: "Europe/Prague"
+
+# Immich version to use
+immich_version: "release"
+
+# Database configuration
+immich_db_username: "postgres"
+immich_db_name: "immich"
+
+# Backup restoration settings
+immich_force_restore: false

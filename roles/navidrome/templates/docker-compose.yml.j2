@@ -1,0 +1,12 @@
+services:
+  navidrome:
+    image: deluan/navidrome:latest
+    user: 1001:1001 # should be owner of volumes
+    ports:
+      - "80:4533"
+    restart: unless-stopped
+    environment:
+      ND_ENABLEINSIGHTSCOLLECTOR: false
+    volumes:
+      - "/opt/navidrome/data:/data"
+      - "/mnt/music:/music:ro"

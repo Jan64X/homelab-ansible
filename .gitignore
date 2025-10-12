@@ -1,0 +1,20 @@
+# Ignore all files in credentials, but not the directories themselves
+credentials/*
+!credentials/ssh_keys/
+!credentials/hosts/
+credentials/ssh_keys/*
+credentials/hosts/*
+!credentials/ssh_keys/*.example
+!credentials/ssh_keys/README.md
+!credentials/hosts/README.md
+!credentials/*.example
+
+# Ignore actual configuration files but allow examples
+group_vars/all.yml
+group_vars/homelab.yml
+group_vars/vpses.yml
+inventory/hosts.yml
+
+# Keep example files
+!group_vars/*.example
+!inventory/*.example

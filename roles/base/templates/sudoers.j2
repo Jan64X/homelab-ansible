@@ -1,0 +1,15 @@
+Defaults    env_reset
+Defaults    mail_badpass
+Defaults    secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Defaults    use_pty
+
+# Allow root to run commands without password
+root ALL=(ALL:ALL) NOPASSWD:ALL
+
+# Allow ansible user to run commands without password
+{{ ansible_user }} ALL=(ALL:ALL) NOPASSWD:ALL
+
+# Allow wheel group sudo access
+%wheel ALL=(ALL:ALL) ALL
+
+@includedir /etc/sudoers.d

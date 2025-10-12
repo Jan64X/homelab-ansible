@@ -1,0 +1,13 @@
+[Unit]
+Description=Mount NAS files share for FileCDN
+After=wait-for-nas.service
+Requires=wait-for-nas.service
+
+[Mount]
+What=//{{ nas_ip }}/tank/Server/filescdn
+Where=/mnt/filescdn
+Type=cifs
+Options=credentials=/etc/filescdn-nas-credentials,uid=0,gid=0,iocharset=utf8,vers=3.0,_netdev,x-systemd.device-timeout=30s
+
+[Install]
+WantedBy=multi-user.target

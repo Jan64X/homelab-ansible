@@ -1,0 +1,24 @@
+server {
+    listen 443 ssl;
+    server_name {{ base_domain }};
+
+    ssl_certificate {{ nginx_ssl_cert_path }};
+    ssl_certificate_key {{ nginx_ssl_key_path }};
+    ssl_client_certificate {{ nginx_ssl_client_cert_path }};
+    ssl_verify_client off; # Optional, adjust based on your needs
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
+    root /srv/nginx/{{ base_domain }};
+
+    location / {
+        proxy_redirect off;
+        proxy_bind $server_addr;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header Forwarded $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

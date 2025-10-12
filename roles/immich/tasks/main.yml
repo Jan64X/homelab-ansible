@@ -1,0 +1,341 @@
+---
+- name: Install required packages for Docker repository
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+      - cifs-utils
+      - python3-passlib
+      - netcat-openbsd
+    state: present
+    update_cache: true
+
+- name: Create directory for Docker GPG key
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: Add Docker GPG key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/debian/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: '0644'
+
+- name: Set Docker GPG key permissions
+  ansible.builtin.file:
+    path: /etc/apt/keyrings/docker.asc
+    mode: '0644'
+    owner: root
+    group: root
+
+- name: Get system architecture
+  ansible.builtin.command: dpkg --print-architecture
+  register: system_arch
+  changed_when: false
+
+- name: Add Docker repository
+  ansible.builtin.apt_repository:
+    repo: "deb [arch={{ system_arch.stdout }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable"
+    state: present
+    filename: docker
+
+- name: Install Docker and Docker Compose plugin
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-compose-plugin
+    state: present
+    update_cache: true
+
+- name: Ensure Docker service is running
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Load NAS credentials
+  ansible.builtin.include_vars:
+    file: ./credentials/nas_creds.txt
+
+- name: Create immich application directory
+  ansible.builtin.file:
+    path: /opt/immich
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+
+- name: Check if postgres directory exists
+  ansible.builtin.stat:
+    path: /opt/immich/postgres
+  register: postgres_dir_check
+
+- name: Create postgres directory only if it doesn't exist
+  ansible.builtin.file:
+    path: /opt/immich/postgres
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+  when: not postgres_dir_check.stat.exists
+
+- name: Create NAS mount point directory
+  ansible.builtin.file:
+    path: /mnt/immich-photos
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+
+- name: Mount NAS for photos
+  ansible.posix.mount:
+    path: /mnt/immich-photos
+    src: "//{{ nas_ip }}/tank/Server/immich"
+    fstype: cifs
+    opts: "username={{ nas_user }},password={{ nas_password }},uid=0,gid=0,iocharset=utf8,vers=3.0"
+    state: mounted
+
+- name: Check if postgres password exists
+  ansible.builtin.stat:
+    path: /etc/immich-postgres-password
+  register: postgres_password_file
+
+- name: Check if backup password exists on NAS
+  ansible.builtin.stat:
+    path: /mnt/immich-photos/backups/postgres_password.txt
+  register: nas_postgres_password_file
+
+- name: Use existing password from NAS if available (for backup restoration)
+  ansible.builtin.copy:
+    src: /mnt/immich-photos/backups/postgres_password.txt
+    dest: /etc/immich-postgres-password
+    mode: '0600'
+    owner: root
+    group: root
+    remote_src: yes
+  when: 
+    - not postgres_password_file.stat.exists
+    - nas_postgres_password_file.stat.exists
+
+- name: Generate postgres password (only if no existing password anywhere)
+  ansible.builtin.shell: |
+    python3 -c "import secrets, string; print(''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32)))"
+  register: generated_postgres_password
+  when: 
+    - not postgres_password_file.stat.exists
+    - not nas_postgres_password_file.stat.exists
+
+- name: Store postgres password locally
+  ansible.builtin.copy:
+    content: "{{ generated_postgres_password.stdout }}"
+    dest: /etc/immich-postgres-password
+    mode: '0600'
+    owner: root
+    group: root
+  when: 
+    - not postgres_password_file.stat.exists
+    - not nas_postgres_password_file.stat.exists
+
+- name: Read postgres password
+  ansible.builtin.slurp:
+    src: /etc/immich-postgres-password
+  register: postgres_password_content
+
+- name: Set postgres password fact
+  ansible.builtin.set_fact:
+    immich_postgres_password: "{{ postgres_password_content.content | b64decode | trim }}"
+
+- name: Check if immich setup is complete
+  ansible.builtin.stat:
+    path: /etc/immich-setup-complete.flag
+  register: immich_setup_complete
+
+- name: Find latest database backup
+  ansible.builtin.find:
+    paths: /mnt/immich-photos/backups
+    patterns: "immich-db-backup-*.sql.gz"
+    use_regex: false
+  register: backup_files
+  when: not immich_setup_complete.stat.exists or immich_force_restore | default(false)
+
+- name: Set latest backup file
+  ansible.builtin.set_fact:
+    latest_backup: "{{ backup_files.files | sort(attribute='mtime') | last }}"
+  when: (not immich_setup_complete.stat.exists or immich_force_restore | default(false)) and backup_files.files | length > 0
+
+- name: Display backup restoration info
+  ansible.builtin.debug:
+    msg:
+      - "=== IMMICH DATABASE RESTORATION ==="
+      - "{% if (not immich_setup_complete.stat.exists or immich_force_restore | default(false)) and backup_files.files | length > 0 %}Latest backup found: {{ latest_backup.path }}{% else %}No backup restoration needed or no backups found{% endif %}"
+      - "Force restore: {{ immich_force_restore | default(false) }}"
+      - "Setup complete: {{ immich_setup_complete.stat.exists }}"
+      - "=================================="
+
+- name: Create docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: /opt/immich/docker-compose.yml
+    mode: '0644'
+    owner: root
+    group: root
+
+- name: Create .env file
+  ansible.builtin.template:
+    src: env.j2
+    dest: /opt/immich/.env
+    mode: '0600'
+    owner: root
+    group: root
+
+- name: Create systemd NAS credentials file
+  ansible.builtin.copy:
+    content: |
+      username={{ nas_user }}
+      password={{ nas_password }}
+    dest: /etc/immich-nas-credentials
+    mode: '0600'
+    owner: root
+    group: root
+
+- name: Create systemd mount unit for NAS
+  ansible.builtin.template:
+    src: mnt-immich-photos.mount.j2
+    dest: /etc/systemd/system/mnt-immich\x2dphotos.mount
+    mode: '0644'
+    owner: root
+    group: root
+  notify: Reload systemd
+
+- name: Create wait-for-nas systemd service
+  ansible.builtin.template:
+    src: wait-for-nas.service.j2
+    dest: /etc/systemd/system/wait-for-nas.service
+    mode: '0644'
+    owner: root
+    group: root
+  notify: Reload systemd
+
+- name: Create immich systemd service
+  ansible.builtin.template:
+    src: immich.service.j2
+    dest: /etc/systemd/system/immich.service
+    mode: '0644'
+    owner: root
+    group: root
+  notify: Reload systemd
+
+- name: Enable wait-for-nas service
+  systemd:
+    name: wait-for-nas.service
+    enabled: yes
+    daemon_reload: yes
+
+- name: Enable and start immich service
+  systemd:
+    name: immich.service
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Database restoration block
+  block:
+    - name: Stop immich services for restoration
+      community.docker.docker_compose_v2:
+        project_src: /opt/immich
+        state: stopped
+
+    - name: Remove postgres data for clean restore (if force restore)
+      ansible.builtin.file:
+        path: /opt/immich/postgres
+        state: absent
+      when: immich_force_restore | default(false)
+
+    - name: Recreate postgres directory for force restore
+      ansible.builtin.file:
+        path: /opt/immich/postgres
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+      when: immich_force_restore | default(false)
+
+    - name: Create containers without starting them
+      ansible.builtin.shell:
+        cmd: docker compose create
+        chdir: /opt/immich
+      register: compose_create_result
+
+    - name: Start only postgres container
+      ansible.builtin.shell:
+        cmd: docker start immich_postgres
+        chdir: /opt/immich
+      register: postgres_start_result
+
+    - name: Wait for postgres to be ready
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Check postgres readiness
+      ansible.builtin.shell:
+        cmd: docker exec immich_postgres pg_isready -U postgres
+      register: postgres_ready
+      retries: 10
+      delay: 3
+      until: postgres_ready.rc == 0
+
+    - name: Restore database from backup
+      ansible.builtin.shell:
+        cmd: |
+          gunzip --stdout "{{ latest_backup.path }}" | \
+          sed "s/SELECT pg_catalog.set_config('search_path', '', false);/SELECT pg_catalog.set_config('search_path', 'public, pg_catalog', true);/g" | \
+          docker exec -i immich_postgres psql --dbname=postgres --username=postgres
+      register: restore_result
+
+    - name: Display restoration result
+      ansible.builtin.debug:
+        msg:
+          - "=== DATABASE RESTORATION COMPLETE ==="
+          - "Backup restored from: {{ latest_backup.path }}"
+          - "Restoration successful"
+          - "======================================"
+
+    - name: Start all immich services after restoration
+      community.docker.docker_compose_v2:
+        project_src: /opt/immich
+        state: present
+
+  when: (not immich_setup_complete.stat.exists or immich_force_restore | default(false)) and backup_files.files | length > 0
+
+- name: Mark immich setup as complete
+  ansible.builtin.copy:
+    content: |
+      # Immich setup completed on {{ ansible_date_time.iso8601 }}
+      # Database backup restoration handled during initial setup
+      # Do not delete this file - it prevents automatic backup restoration
+      # Generated by Ansible from {{ ansible_hostname }}
+    dest: /etc/immich-setup-complete.flag
+    mode: '0644'
+    owner: root
+    group: root
+  when: not immich_setup_complete.stat.exists
+
+- name: Display immich status
+  ansible.builtin.debug:
+    msg: 
+      - "=== IMMICH SETUP COMPLETE ==="
+      - "Immich is running at http://{{ ansible_default_ipv4.address }}:80"
+      - "{% if not immich_setup_complete.stat.exists and backup_files.files | length > 0 %}Database restored from backup{% else %}Fresh installation, already setup or no backup found{% endif %}"
+      - "=============================="
+
+- name: Allow immich port through firewall
+  community.general.ufw:
+    rule: allow
+    port: 80
+    proto: tcp
+  notify: Reload ufw

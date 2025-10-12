@@ -1,0 +1,3 @@
+---
+# Sharkey role default variables
+sharkey_fresh_install: false

@@ -1,0 +1,26 @@
+[Unit]
+Description=Immich Photo Management System
+Documentation=https://immich.app/docs
+
+# This service now only needs to wait for the mount to be ready.
+# The mount unit itself is already waiting for the network, creating the chain.
+Requires=mnt-immich\x2dphotos.mount
+After=mnt-immich\x2dphotos.mount
+BindsTo=mnt-immich\x2dphotos.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/immich
+# No need for ExecStartPre, as the Requires= directive guarantees the mount exists.
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+ExecStop=/usr/bin/docker compose down
+ExecReload=/usr/bin/docker compose pull
+ExecReload=/usr/bin/docker compose up -d --remove-orphans
+TimeoutStartSec=300
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

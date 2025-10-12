@@ -1,0 +1,120 @@
+---
+- name: Install required packages
+  ansible.builtin.apt:
+    name:
+      - nginx
+      - cifs-utils
+      - git
+    state: present
+    update_cache: true
+
+- name: Create nginx config directories
+  ansible.builtin.file:
+    path: "{{ directory }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /etc/nginx/conf.d
+    - /etc/nginx/ssl
+    - /srv/nginx
+    - /srv/nginx/logs
+  loop_control:
+    loop_var: directory
+
+- name: Load NAS credentials
+  ansible.builtin.include_vars:
+    file: ./credentials/nas_creds.txt
+
+- name: Create temporary NAS mount point
+  ansible.builtin.file:
+    path: /tmp/nas_mount
+    state: directory
+    mode: '0755'
+
+- name: Mount NAS temporarily for SSL certificates
+  ansible.posix.mount:
+    path: /tmp/nas_mount
+    src: "//{{ nas_ip }}/tank/Server/nginx"
+    fstype: cifs
+    opts: "username={{ nas_user }},password={{ nas_password }},uid=0,gid=0,iocharset=utf8,vers=3.0"
+    state: mounted
+  changed_when: false
+
+- name: Copy SSL certificates from NAS
+  ansible.builtin.copy:
+    src: "/tmp/nas_mount/ssl/{{ cert_file.src }}"
+    dest: "{{ cert_file.dest }}"
+    remote_src: yes
+    mode: '0600'
+  loop: "{{ nginx_ssl_certificates }}"
+  loop_control:
+    loop_var: cert_file
+
+- name: Unmount NAS
+  ansible.posix.mount:
+    path: /tmp/nas_mount
+    state: unmounted
+  changed_when: false
+
+- name: Configure main nginx.conf
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    mode: '0644'
+  notify: Restart nginx
+
+- name: Configure virtual hosts
+  ansible.builtin.template:
+    src: "{{ vhost }}.conf.j2"
+    dest: "/etc/nginx/conf.d/{{ vhost }}.conf"
+    mode: '0644'
+  loop: "{{ nginx_vhosts }}"
+  loop_control:
+    loop_var: vhost
+  notify: Restart nginx
+
+- name: Check current website commit (if exists)
+  ansible.builtin.command:
+    cmd: git rev-parse HEAD
+    chdir: "{{ static_website.local_path }}"
+  register: current_commit
+  failed_when: false
+  changed_when: false
+  when: static_website.enabled | default(false)
+
+- name: Get latest commit from remote repository
+  ansible.builtin.uri:
+    url: "{{ static_website.github_api_url }}"
+    method: GET
+  register: github_commit
+  when: static_website.enabled | default(false)
+  
+- name: Clone or update website repository
+  ansible.builtin.git:
+    repo: "{{ static_website.repo_url }}"
+    dest: "{{ static_website.local_path }}"
+    version: "{{ static_website.repo_branch }}"
+    force: yes
+  when: 
+    - static_website.enabled | default(false)
+    - current_commit.rc != 0 or current_commit.stdout != github_commit.json.sha
+
+- name: Ensure nginx is running and enabled
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true
+
+- name: Allow HTTPS
+  community.general.ufw:
+    rule: allow
+    port: 443
+    proto: tcp
+  notify: Reload ufw
+
+- name: Allow HTTP port 8080 for monitoring
+  community.general.ufw:
+    rule: allow
+    port: 8080
+    proto: tcp
+  notify: Reload ufw

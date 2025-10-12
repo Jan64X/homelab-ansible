@@ -1,0 +1,22 @@
+---
+# System Configuration
+# Change this to your preferred username on managed systems
+system_user: sysadmin
+system_user_groups:
+  - wheel
+  - ssh
+
+# Ansible automation user (used by Ansible to connect and manage systems)
+ansible_user: ansible
+ansible_user_groups: 
+  - ssh
+
+# SSH Configuration
+ssh_port: 22
+
+# Ansible User SSH Key (same for all hosts)
+ansible_ssh_public_key: "{{ lookup('file', playbook_dir + '/credentials/ssh_keys/ansible_admin.pub') }}"
+
+# Home public IP for VPS prometheus exporter firewall whitelist
+# Replace with your actual home/office IP
+home_public_ip: "203.0.113.1"

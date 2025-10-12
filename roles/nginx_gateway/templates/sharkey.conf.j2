@@ -1,0 +1,21 @@
+server {
+    listen 443 ssl;
+    server_name {{ services.sharkey.domain }};
+    client_max_body_size 10000M;
+    access_log /srv/nginx/logs/base2.access.log main;
+
+    ssl_certificate {{ nginx_ssl_cert_path }};
+    ssl_certificate_key {{ nginx_ssl_key_path }};
+    ssl_client_certificate {{ nginx_ssl_client_cert_path }};
+    ssl_verify_client off;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
+    location / {
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        real_ip_header CF-Connecting-IP;
+        proxy_pass {{ services.sharkey.backend_server }};
+    }
+}

@@ -1,0 +1,290 @@
+---
+- name: Install required packages for Docker repository
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+      - python3-requests
+    state: present
+    update_cache: true
+  become: true
+
+- name: Create directory for Docker GPG key
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Add Docker GPG key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/debian/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: '0644'
+  become: true
+
+- name: Set Docker GPG key permissions
+  ansible.builtin.file:
+    path: /etc/apt/keyrings/docker.asc
+    mode: '0644'
+    owner: root
+    group: root
+  become: true
+
+- name: Get system architecture
+  ansible.builtin.command: dpkg --print-architecture
+  register: system_arch
+  changed_when: false
+
+- name: Add Docker repository
+  ansible.builtin.apt_repository:
+    repo: "deb [arch={{ system_arch.stdout }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable"
+    state: present
+    filename: docker
+  become: true
+
+- name: Install Docker and Docker Compose plugin
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-compose-plugin
+    state: present
+    update_cache: true
+  become: true
+
+- name: Ensure Docker service is running
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+  become: true
+
+- name: Create UniFi Controller directories
+  ansible.builtin.file:
+    path: "{{ directory_item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /etc/unifi
+    - /etc/unifi/db-init
+  loop_control:
+    loop_var: directory_item
+  become: true
+
+- name: Load NAS credentials
+  ansible.builtin.include_vars:
+    file: "{{ playbook_dir }}/credentials/nas_creds.txt"
+
+- name: Ensure NAS mount directory exists
+  ansible.builtin.file:
+    path: /mnt/nas_unifi
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Add NAS share to fstab (noauto)
+  ansible.posix.mount:
+    path: /mnt/nas_unifi
+    src: "//{{ nas_ip }}/tank/Server/unifi"
+    fstype: cifs
+    opts: "username={{ nas_user }},password={{ nas_password }},uid=0,gid=0,noauto"
+    state: present
+  become: true
+  no_log: true
+
+- name: Mount NAS for backup operations
+  ansible.builtin.command: mount /mnt/nas_unifi
+  become: true
+  changed_when: false
+  failed_when: false
+
+- name: Check if UniFi container exists
+  community.docker.docker_container_info:
+    name: unifi-network-application
+  register: unifi_container
+  become: true
+
+- name: Create credentials directory if it doesn't exist
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/credentials/hosts/{{ inventory_hostname }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+
+- name: Generate MongoDB root password
+  ansible.builtin.set_fact:
+    mongo_root_password: "{{ lookup('ansible.builtin.password',
+                            playbook_dir + '/credentials/hosts/' + inventory_hostname + '/mongo_root_password.txt' +
+                            ' chars=ascii_letters,digits length=32') }}"
+
+- name: Generate MongoDB UniFi user password
+  ansible.builtin.set_fact:
+    mongo_unifi_password: "{{ lookup('ansible.builtin.password',
+                            playbook_dir + '/credentials/hosts/' + inventory_hostname + '/mongo_unifi_password.txt' +
+                            ' chars=ascii_letters,digits length=32') }}"
+
+- name: Create MongoDB init script
+  ansible.builtin.template:
+    src: init-mongo.sh.j2
+    dest: /etc/unifi/db-init/init-mongo.sh
+    mode: '0755'
+  become: true
+  register: mongo_init_result
+
+- name: Copy docker-compose.yml for UniFi Controller
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: /etc/unifi/docker-compose.yml
+    mode: '0644'
+  become: true
+  register: compose_result
+
+- name: Check if any backups exist on NAS
+  ansible.builtin.find:
+    paths: /mnt/nas_unifi
+    patterns: "unifi_backup_*.unf"
+  register: unifi_backup_files
+  become: true
+
+- name: Restore from latest backup if available and not fresh install
+  when: 
+    - unifi_backup_files.matched > 0 
+    - not unifi_fresh_install | default(false)
+    - not unifi_container.exists
+  block:
+    - name: Find latest backup
+      ansible.builtin.shell: set -o pipefail && ls -t /mnt/nas_unifi/unifi_backup_*.unf | head -1
+      register: unifi_latest_backup
+      changed_when: false
+      become: true
+      args:
+        executable: /bin/bash
+      ignore_errors: true
+
+    - name: Create UniFi data directory with proper permissions
+      ansible.builtin.file:
+        path: /var/lib/unifi
+        state: directory
+        owner: "999"
+        group: "999"
+        mode: '0755'
+      become: true
+
+    - name: Copy backup to UniFi data directory for auto-restore
+      ansible.builtin.copy:
+        src: "{{ unifi_latest_backup.stdout }}"
+        dest: /var/lib/unifi/data/backup/autobackup/
+        remote_src: true
+        owner: "999"
+        group: "999"
+        mode: '0644'
+      become: true
+      when: unifi_latest_backup.stdout is defined and unifi_latest_backup.rc == 0
+
+- name: Ensure UniFi data directory exists with correct permissions
+  ansible.builtin.file:
+    path: /var/lib/unifi
+    owner: "999"
+    group: "999"
+    mode: '0755'
+    state: directory
+    recurse: true
+  become: true
+
+- name: Start UniFi Controller containers
+  community.docker.docker_compose_v2:
+    project_src: /etc/unifi
+    state: present
+    pull: "always"
+  become: true
+  when: mongo_init_result.changed or compose_result.changed or not unifi_container.exists
+
+- name: Wait for UniFi Controller to initialize
+  ansible.builtin.wait_for:
+    port: 8443
+    delay: 30
+    timeout: 300
+
+- name: Create backup script
+  ansible.builtin.template:
+    src: backup_unifi.sh.j2
+    dest: /etc/unifi/backup_unifi.sh
+    mode: '0755'
+  become: true
+
+- name: Set up cron job for automatic backup
+  ansible.builtin.cron:
+    name: "Backup UniFi Controller to NAS"
+    job: "/etc/unifi/backup_unifi.sh"
+    hour: "4"
+    minute: "0"
+    user: root
+  become: true
+
+- name: Allow UniFi Controller web interface
+  community.general.ufw:
+    rule: allow
+    port: 8443
+    proto: tcp
+  notify: Reload ufw
+
+- name: Allow UniFi STUN port
+  community.general.ufw:
+    rule: allow
+    port: 3478
+    proto: udp
+  notify: Reload ufw
+
+- name: Allow UniFi device discovery
+  community.general.ufw:
+    rule: allow
+    port: 10001
+    proto: udp
+  notify: Reload ufw
+
+- name: Allow UniFi device communication
+  community.general.ufw:
+    rule: allow
+    port: 8080
+    proto: tcp
+  notify: Reload ufw
+
+- name: Allow UniFi L2 discovery (optional)
+  community.general.ufw:
+    rule: allow
+    port: 1900
+    proto: udp
+  notify: Reload ufw
+
+- name: Allow UniFi guest portal HTTPS redirect (optional)
+  community.general.ufw:
+    rule: allow
+    port: 8843
+    proto: tcp
+  notify: Reload ufw
+
+- name: Allow UniFi guest portal HTTP redirect (optional)
+  community.general.ufw:
+    rule: allow
+    port: 8880
+    proto: tcp
+  notify: Reload ufw
+
+- name: Allow UniFi mobile throughput test (optional)
+  community.general.ufw:
+    rule: allow
+    port: 6789
+    proto: tcp
+  notify: Reload ufw
+
+- name: Allow UniFi remote syslog (optional)
+  community.general.ufw:
+    rule: allow
+    port: 5514
+    proto: udp
+  notify: Reload ufw

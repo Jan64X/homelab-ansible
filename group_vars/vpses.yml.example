@@ -1,0 +1,4 @@
+---
+# VPS Configuration
+# SSH key for VPS hosts (could be different from homelab)
+sysadmin_ssh_key: "{{ lookup('file', playbook_dir + '/credentials/ssh_keys/sysadmin_vpses.pub') }}"
