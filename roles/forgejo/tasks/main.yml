@@ -1,0 +1,453 @@
+---
+# =============================================================================
+# PACKAGE INSTALLATION
+# =============================================================================
+
+- name: Install required packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+      - python3-docker
+      - cifs-utils
+      - zip # For backups
+      - rsync
+    state: present
+    update_cache: true
+  become: true
+
+- name: Create directory for Docker GPG key
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Add Docker GPG key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/debian/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: '0644'
+  become: true
+
+- name: Get system architecture
+  ansible.builtin.command: dpkg --print-architecture
+  register: system_arch
+  changed_when: false
+
+- name: Add Docker repository
+  ansible.builtin.apt_repository:
+    repo: "deb [arch={{ system_arch.stdout }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable"
+    state: present
+    filename: docker
+  become: true
+
+- name: Install Docker and Docker Compose plugin
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-compose-plugin
+    state: present
+    update_cache: true
+  become: true
+
+- name: Ensure Docker service is running
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+  become: true
+
+# =============================================================================
+# CHECK FOR EXISTING INSTALLATION
+# =============================================================================
+
+- name: Check if Forgejo is already installed
+  ansible.builtin.stat:
+    path: /opt/forgejo/data
+  register: forgejo_existing
+
+- name: Set installation type
+  ansible.builtin.set_fact:
+    is_fresh_install: "{{ not forgejo_existing.stat.exists }}"
+
+# =============================================================================
+# BACKUP DISCOVERY (Fresh Install Only)
+# =============================================================================
+
+- name: Load NAS credentials
+  ansible.builtin.include_vars:
+    file: "{{ playbook_dir }}/credentials/nas_creds.txt"
+  no_log: true
+
+- name: Create temporary NAS mount point
+  ansible.builtin.file:
+    path: /mnt/forgejo_temp
+    state: directory
+    mode: '0755'
+  become: true
+  when: is_fresh_install
+
+- name: Mount NAS temporarily to discover backups
+  ansible.posix.mount:
+    path: /mnt/forgejo_temp
+    src: "//{{ nas_ip }}/tank/Server/forgejo/backups"
+    fstype: cifs
+    opts: "username={{ nas_user }},password={{ nas_password }},uid=0,gid=0,dir_mode=0770,iocharset=utf8"
+    state: mounted
+  become: true
+  when: is_fresh_install
+
+- name: Find latest backup on NAS
+  ansible.builtin.find:
+    paths: /mnt/forgejo_temp
+    patterns: 'forgejo-backup-*.zip'
+    age: -90d  # Only look at backups from last 90 days
+  register: backup_files
+  when: is_fresh_install
+
+- name: Set latest backup path
+  ansible.builtin.set_fact:
+    latest_backup: "{{ (backup_files.files | sort(attribute='mtime', reverse=true) | first).path if backup_files.files | length > 0 else '' }}"
+  when: is_fresh_install
+
+- name: Display backup discovery results
+  ansible.builtin.debug:
+    msg:
+      - "Fresh install: {{ is_fresh_install }}"
+      - "Latest backup found: {{ latest_backup | default('None') }}"
+      - "Force fresh (skip restore): {{ forgejo_force_fresh | default(false) }}"
+      - "Will restore: {{ latest_backup != '' and is_fresh_install and not (forgejo_force_fresh | default(false)) }}"
+  when: is_fresh_install
+
+# =============================================================================
+# DIRECTORY STRUCTURE
+# =============================================================================
+
+- name: Create Forgejo directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+    owner: '1000'
+    group: '1000'
+  loop:
+    - /opt/forgejo
+    - /opt/forgejo/data
+    - /opt/forgejo/mysql
+  become: true
+
+# =============================================================================
+# CREDENTIALS GENERATION
+# =============================================================================
+
+- name: Create credentials directory
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/credentials/hosts/{{ inventory_hostname }}"
+    state: directory
+    mode: '0700'
+  delegate_to: localhost
+  become: false
+
+- name: Generate database passwords
+  ansible.builtin.set_fact:
+    forgejo_db_password: "{{ lookup('ansible.builtin.password',
+                         playbook_dir + '/credentials/hosts/' + inventory_hostname + '/forgejo_db_password.txt' +
+                         ' chars=ascii_letters,digits length=32') }}"
+    forgejo_db_root_password: "{{ lookup('ansible.builtin.password',
+                              playbook_dir + '/credentials/hosts/' + inventory_hostname + '/forgejo_db_root_password.txt' +
+                              ' chars=ascii_letters,digits length=32') }}"
+
+# =============================================================================
+# DOCKER COMPOSE DEPLOYMENT
+# =============================================================================
+
+- name: Deploy docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: /opt/forgejo/docker-compose.yml
+    mode: '0644'
+  become: true
+  notify: Restart Forgejo
+
+- name: Start Forgejo with Docker Compose
+  community.docker.docker_compose_v2:
+    project_src: /opt/forgejo
+    state: present
+    pull: "always"
+  become: true
+
+- name: Wait for Forgejo to be ready
+  ansible.builtin.uri:
+    url: "http://localhost:{{ forgejo_port | default('3000') }}"
+    method: GET
+    status_code: 200
+  register: forgejo_health
+  until: forgejo_health.status == 200
+  retries: 30
+  delay: 10
+
+# =============================================================================
+# BACKUP RESTORATION (Fresh Install Only)
+# =============================================================================
+
+- name: Copy backup to temporary location
+  ansible.builtin.copy:
+    src: "{{ latest_backup }}"
+    dest: "/tmp/forgejo-restore.zip"
+    remote_src: true
+    mode: '0644'
+  become: true
+  when:
+    - is_fresh_install
+    - latest_backup != ''
+    - not (forgejo_force_fresh | default(false))
+
+- name: Stop Forgejo containers for restoration
+  community.docker.docker_compose_v2:
+    project_src: /opt/forgejo
+    state: stopped
+  become: true
+  when:
+    - is_fresh_install
+    - latest_backup != ''
+    - not (forgejo_force_fresh | default(false))
+
+- name: Extract backup to temporary directory
+  ansible.builtin.unarchive:
+    src: "/tmp/forgejo-restore.zip"
+    dest: "/tmp"
+    remote_src: true
+  become: true
+  when:
+    - is_fresh_install
+    - latest_backup != ''
+    - not (forgejo_force_fresh | default(false))
+
+- name: Restore Forgejo data directory
+  ansible.posix.synchronize:
+    src: "/tmp/data/"
+    dest: "/var/lib/forgejo/data/"
+  delegate_to: "{{ inventory_hostname }}"
+  become: true
+  when:
+    - is_fresh_install
+    - latest_backup != ''
+    - not (forgejo_force_fresh | default(false))
+
+- name: Check if app.ini exists in backup
+  ansible.builtin.stat:
+    path: "/tmp/config/app.ini"
+  register: backup_app_ini
+  become: true
+  when:
+    - is_fresh_install
+    - latest_backup != ''
+    - not (forgejo_force_fresh | default(false))
+
+- name: Restore app.ini configuration from backup
+  ansible.builtin.copy:
+    src: "/tmp/config/app.ini"
+    dest: "/var/lib/forgejo/data/gitea/conf/app.ini"
+    remote_src: true
+    owner: '1000'
+    group: '1000'
+    mode: '0640'
+  become: true
+  when:
+    - is_fresh_install
+    - latest_backup != ''
+    - not (forgejo_force_fresh | default(false))
+    - backup_app_ini.stat.exists
+
+- name: Restore MySQL database
+  ansible.builtin.shell: |
+    # Start only the database container
+    cd /opt/forgejo
+    docker compose up -d db
+    
+    # Wait for database to be ready
+    sleep 10
+    
+    # Restore database from SQL dump
+    docker exec -i forgejo-db mysql -uroot -p{{ forgejo_db_root_password }} forgejo < /tmp/forgejo-db.sql
+  become: true
+  when:
+    - is_fresh_install
+    - latest_backup != ''
+    - not (forgejo_force_fresh | default(false))
+  args:
+    executable: /bin/bash
+
+- name: Set correct ownership on restored data
+  ansible.builtin.file:
+    path: /var/lib/forgejo/data
+    owner: '1000'
+    group: '1000'
+    recurse: true
+  become: true
+  when:
+    - is_fresh_install
+    - latest_backup != ''
+    - not (forgejo_force_fresh | default(false))
+
+- name: Start all Forgejo containers after restoration
+  community.docker.docker_compose_v2:
+    project_src: /opt/forgejo
+    state: present
+  become: true
+  when:
+    - is_fresh_install
+    - latest_backup != ''
+    - not (forgejo_force_fresh | default(false))
+
+- name: Clean up temporary restoration files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/forgejo-restore.zip
+    - /tmp/data
+    - /tmp/config
+    - /tmp/forgejo-db.sql
+    - /tmp/forgejo-repo.zip
+  become: true
+  when:
+    - is_fresh_install
+    - latest_backup != ''
+    - not (forgejo_force_fresh | default(false))
+
+- name: Wait for Forgejo to be ready after restoration
+  ansible.builtin.uri:
+    url: "http://localhost:{{ forgejo_port | default('3000') }}"
+    method: GET
+    status_code: 200
+  register: forgejo_health_restore
+  until: forgejo_health_restore.status == 200
+  retries: 30
+  delay: 10
+  when:
+    - is_fresh_install
+    - latest_backup != ''
+    - not (forgejo_force_fresh | default(false))
+
+- name: Display restoration success message
+  ansible.builtin.debug:
+    msg: "Forgejo has been successfully restored from backup: {{ latest_backup | basename }}"
+  when:
+    - is_fresh_install
+    - latest_backup != ''
+    - not (forgejo_force_fresh | default(false))
+
+# =============================================================================
+# CLEANUP TEMPORARY NAS MOUNT
+# =============================================================================
+
+- name: Unmount temporary NAS mount
+  ansible.posix.mount:
+    path: /mnt/forgejo_temp
+    state: unmounted
+  become: true
+  when: is_fresh_install
+
+- name: Remove temporary mount point
+  ansible.builtin.file:
+    path: /mnt/forgejo_temp
+    state: absent
+  become: true
+  when: is_fresh_install
+
+# =============================================================================
+# BACKUP SYSTEM SETUP
+# =============================================================================
+
+- name: Create NAS mount point for backups
+  ansible.builtin.file:
+    path: /mnt/forgejo_backup
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Add NAS mount to fstab
+  ansible.posix.mount:
+    path: /mnt/forgejo_backup
+    src: "//{{ nas_ip }}/tank/Server/forgejo/backups"
+    fstype: cifs
+    opts: "username={{ nas_user }},password={{ nas_password }},uid=0,gid=0,dir_mode=0770,iocharset=utf8,noauto,x-systemd.automount"
+    state: present
+  become: true
+
+- name: Create backup script
+  ansible.builtin.template:
+    src: forgejo-backup.sh.j2
+    dest: /opt/forgejo/backup.sh
+    mode: '0755'
+  become: true
+
+- name: Create backup cron job
+  ansible.builtin.cron:
+    name: "Forgejo daily backup"
+    minute: "0"
+    hour: "3"
+    job: "/opt/forgejo/backup.sh >> /var/log/forgejo-backup.log 2>&1"
+    user: root
+  become: true
+
+- name: Create log rotation for backup
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/forgejo-backup
+    content: |
+      /var/log/forgejo-backup.log {
+          daily
+          rotate 7
+          compress
+          missingok
+          notifempty
+      }
+    mode: '0644'
+  become: true
+
+# =============================================================================
+# FIREWALL
+# =============================================================================
+
+- name: Allow Forgejo ports
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop:
+    - "{{ forgejo_port | default('3000') }}"
+    - "{{ forgejo_ssh_port | default('2222') }}"
+  become: true
+  notify: Reload ufw
+
+# =============================================================================
+# FIRST RUN INSTRUCTIONS
+# =============================================================================
+
+- name: Display first run instructions
+  ansible.builtin.debug:
+    msg: |
+      ===================================================================
+      Forgejo installation complete!
+
+      {% if is_fresh_install and latest_backup != '' %}
+      ✓ Restored from backup: {{ latest_backup | basename }}
+      Your Forgejo instance should be ready with all previous data.
+      {% elif is_fresh_install %}
+      ⚠ Fresh installation - no backup found to restore
+      Access the web installer at: http://{{ ansible_host }}:{{ forgejo_port }}/install
+      Admin username: Choose any username EXCEPT 'admin' (reserved)
+      Admin email: Use @forgejo.{{ forgejo_domain | default(services.forgejo.domain | default('localhost')) }}
+      {% else %}
+      ✓ Existing installation updated
+      {% endif %}
+
+      Web interface: http://{{ ansible_host }}:{{ forgejo_port }}
+      SSH clone URL: ssh://git@{{ ansible_host }}:{{ forgejo_ssh_port }}/user/repo.git
+      ===================================================================
+  when: is_fresh_install or (latest_backup is defined and latest_backup != '')

@@ -1,0 +1,12 @@
+---
+- name: Reload ufw
+  ansible.builtin.service:
+    name: ufw
+    state: reloaded
+  become: true
+
+- name: Restart Forgejo
+  community.docker.docker_compose_v2:
+    project_src: /opt/forgejo
+    state: restarted
+  become: true

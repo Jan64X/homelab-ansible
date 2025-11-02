@@ -1,0 +1,116 @@
+#!/bin/bash
+set -euo pipefail
+
+# Configuration
+BACKUP_DATE=$(date +%Y%m%d_%H%M%S)
+BACKUP_NAME="forgejo-backup-${BACKUP_DATE}"
+TEMP_DIR="/tmp/forgejo-backup-$$"
+NAS_MOUNT="/mnt/forgejo_backup"
+RETENTION_DAYS=14
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+cleanup() {
+    local exit_code=$?
+    rm -rf "${TEMP_DIR}"
+    if [ $exit_code -ne 0 ]; then
+        log "ERROR: Backup failed with exit code $exit_code"
+    fi
+    exit $exit_code
+}
+
+trap cleanup EXIT INT TERM
+
+# Main backup process
+log "Starting Forgejo backup"
+
+# Create temporary directory
+mkdir -p "${TEMP_DIR}"
+
+# Backup database
+log "Backing up MySQL database"
+if ! docker exec forgejo-db mysqldump \
+    -uroot \
+    -p{{ forgejo_db_root_password }} \
+    --single-transaction \
+    --routines \
+    --triggers \
+    forgejo > "${TEMP_DIR}/forgejo-db.sql"; then
+    log "ERROR: Database backup failed"
+    exit 1
+fi
+
+# Backup Forgejo data directory
+log "Backing up Forgejo data directory"
+if ! cp -a /var/lib/forgejo/data "${TEMP_DIR}/"; then
+    log "ERROR: Data directory backup failed"
+    exit 1
+fi
+
+# Backup app.ini configuration
+log "Backing up Forgejo configuration (app.ini)"
+if [ -f /var/lib/forgejo/data/gitea/conf/app.ini ]; then
+    mkdir -p "${TEMP_DIR}/config"
+    if ! cp /var/lib/forgejo/data/gitea/conf/app.ini "${TEMP_DIR}/config/"; then
+        log "WARNING: Failed to backup app.ini"
+    fi
+else
+    log "WARNING: app.ini not found, skipping configuration backup"
+fi
+
+# Create compressed archive
+log "Creating compressed backup archive"
+cd "${TEMP_DIR}"
+if [ -d "config" ]; then
+    zip -r "${BACKUP_NAME}.zip" data config forgejo-db.sql
+else
+    zip -r "${BACKUP_NAME}.zip" data forgejo-db.sql
+fi
+if [ $? -ne 0 ]; then
+    log "ERROR: Failed to create backup archive"
+    exit 1
+fi
+
+# Ensure NAS mount point exists
+if [ ! -d "${NAS_MOUNT}" ]; then
+    log "ERROR: NAS mount point does not exist"
+    exit 1
+fi
+
+# Mount NAS backup directory
+log "Mounting NAS backup directory"
+if ! mountpoint -q "${NAS_MOUNT}"; then
+    if ! mount "${NAS_MOUNT}"; then
+        log "ERROR: Failed to mount NAS"
+        exit 1
+    fi
+fi
+
+# Copy to NAS
+log "Copying backup to NAS"
+if ! cp "${TEMP_DIR}/${BACKUP_NAME}.zip" "${NAS_MOUNT}/"; then
+    log "ERROR: Failed to copy backup to NAS"
+    exit 1
+fi
+
+# Verify backup
+log "Verifying backup integrity"
+if ! unzip -t "${NAS_MOUNT}/${BACKUP_NAME}.zip" >/dev/null 2>&1; then
+    log "ERROR: Backup verification failed"
+    exit 1
+fi
+
+BACKUP_SIZE=$(du -h "${NAS_MOUNT}/${BACKUP_NAME}.zip" | cut -f1)
+log "Backup completed successfully (${BACKUP_SIZE})"
+
+# Cleanup old backups
+log "Cleaning up old backups (keeping ${RETENTION_DAYS} days)"
+find "${NAS_MOUNT}" -name "forgejo-backup-*.zip" -mtime +${RETENTION_DAYS} -delete || true
+
+# Unmount NAS
+log "Unmounting NAS backup directory"
+umount "${NAS_MOUNT}" || log "WARNING: Failed to unmount NAS (may already be unmounted)"
+
+log "Backup process finished"

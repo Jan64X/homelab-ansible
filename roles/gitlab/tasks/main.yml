@@ -317,7 +317,7 @@
 - name: Add NAS mount to fstab for automatic mounting
   ansible.posix.mount:
     path: /mnt/gitlab_data
-    src: "//{{ nas_ip }}/tank/gitlab_data"
+    src: "//{{ nas_ip }}/tank/Server/gitlab"
     fstype: cifs
     opts: "username={{ nas_user }},password={{ nas_password }},uid=0,gid=0,dir_mode=02770,iocharset=utf8,x-systemd.mount-timeout=15min,noauto"
     boot: false  # Explicitly set to false to match noauto option

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CDN - Jan Petrlik</title>
+    <title>CDN - {{ base_domain }}</title>
     <style>
         * {
             margin: 0;
@@ -76,8 +76,8 @@
     <div class="container">
         <div class="cdn-label">Content Delivery Network</div>
         <h1>Files CDN</h1>
-        <p>Static file storage and delivery for <span class="domain">janpetrlik.com</span></p>
-        <a href="https://janpetrlik.com">← Back to Main Site</a>
+        <p>Static file storage and delivery for <span class="domain">{{ base_domain }}</span></p>
+        <a href="https://{{ base_domain }}">← Back to Main Site</a>
     </div>
 </body>
 </html>

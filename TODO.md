@@ -16,4 +16,20 @@ changed: [unificontroller]
 
 - Add a task/role to update all docker compose stacks?
 
-- Dang I realised I left the CDN role html template personalized, gotta fix that too
+- fix Forgejo this:
+TASK [forgejo : Display backup discovery results] ****************************************************************************************************************************************************************************************
+skipping: [forgejo]
+
+TASK [forgejo : Create Forgejo directories] **********************************************************************************************************************************************************************************************
+[WARNING]: The loop variable 'item' is already in use.
+Origin: <unknown>
+
+item
+
+You should set the `loop_var` value in the `loop_control` option for the task to something else to avoid variable collisions and unexpected behavior.
+
+TASK [forgejo : Add NAS mount to fstab] **************************************************************************************************************************************************************************************************
+[WARNING]: Ignore the 'boot' due to 'opts' contains 'noauto'.
+[WARNING]: Deprecation warnings can be disabled by setting `deprecation_warnings=False` in ansible.cfg.
+[DEPRECATION WARNING]: Passing `warnings` to `exit_json` or `fail_json` is deprecated. This feature will be removed from ansible-core version 2.23. Use `AnsibleModule.warn` instead.
+ok: [forgejo]

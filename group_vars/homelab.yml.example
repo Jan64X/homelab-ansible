@@ -28,10 +28,11 @@ nginx_ssl_certificates:
 # Each entry corresponds to a template file: templates/<name>.conf.j2
 nginx_vhosts:
   - search
-  - gitlab
+#  - gitlab # uncomment this and comment forgejo to use gitlab instead of forgejo
   - base_domain
   - sharkey
   - filescdn
+  - forgejo
 
 # Service port mappings (ports exposed by each service)
 # Adjust these if your services use different ports
@@ -40,22 +41,27 @@ service_ports:
   gitlab: 80         # GitLab HTTP port
   sharkey: 3000      # Sharkey/Misskey default port
   filescdn: 8080     # File CDN service port
+  forgejo: 3000     # Forgejo default port
 
 # Services configuration
 # These use hostvars to automatically pull backend IPs from inventory/hosts.yml
+# gitlab commented out, if you want to use it then uncomment it then comment out forgejo
 services:
   search:
     domain: "search.{{ base_domain }}"
     backend_server: "http://{{ hostvars['searxng']['ansible_host'] }}:{{ service_ports.search }}"
-  gitlab:
-    domain: "git.{{ base_domain }}"
-    backend_server: "http://{{ hostvars['gitlab']['ansible_host'] }}:{{ service_ports.gitlab }}"
+#  gitlab:
+#    domain: "git.{{ base_domain }}"
+#    backend_server: "http://{{ hostvars['gitlab']['ansible_host'] }}:{{ service_ports.gitlab }}"
   sharkey:
     domain: "fedi.{{ base_domain }}"
     backend_server: "http://{{ hostvars['sharkey']['ansible_host'] }}:{{ service_ports.sharkey }}"
   filescdn:
     domain: "cdn.{{ base_domain }}"
     backend_server: "http://{{ hostvars['filescdn']['ansible_host'] }}:{{ service_ports.filescdn }}"
+  forgejo:
+    domain: "git.{{ base_domain }}"
+    backend_server: "http://{{ hostvars['forgejo']['ansible_host'] }}:{{ service_ports.forgejo }}"
 
 # Service base URLs (used by various roles)
 searxng_base_url: "https://search.{{ base_domain }}"
@@ -64,6 +70,10 @@ sharkey_base_url: "https://fedi.{{ base_domain }}"
 # GitLab configuration (homelab specific)
 gitlab_force_restore: false
 gitlab_force_fresh_install: false
+
+# Forgejo-specific settings (optional)
+forgejo_force_restore: false
+forgejo_force_fresh_install: false
 
 # monitoring - observability role with prometheus and grafana
 monitoring_force_fresh_install: false
