@@ -20,3 +20,12 @@ ansible_ssh_public_key: "{{ lookup('file', playbook_dir + '/credentials/ssh_keys
 # Home public IP for VPS prometheus exporter firewall whitelist
 # Replace with your actual home/office IP
 home_public_ip: "203.0.113.1"
+
+# Grafana SMTP Configuration
+grafana_smtp_enabled: false
+grafana_smtp_host: "smtp.example.com:587"
+grafana_smtp_user: "myuser"
+grafana_smtp_password: "mysecret"
+grafana_smtp_from_address: "grafana@example.com"
+grafana_smtp_from_name: "Grafana"
+grafana_smtp_skip_verify: false

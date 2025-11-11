@@ -18,3 +18,9 @@ inventory/hosts.yml
 # Keep example files
 !group_vars/*.example
 !inventory/*.example
+
+# Ignore vscode settings
+.vscode/
+
+# Ignore .ansible
+.ansible/
