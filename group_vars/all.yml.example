@@ -23,9 +23,18 @@ home_public_ip: "203.0.113.1"
 
 # Grafana SMTP Configuration
 grafana_smtp_enabled: false
-grafana_smtp_host: "smtp.example.com:587"
+grafana_smtp_host: "smtp.example.com:465"
 grafana_smtp_user: "myuser"
 grafana_smtp_password: "mysecret"
 grafana_smtp_from_address: "grafana@example.com"
 grafana_smtp_from_name: "Grafana"
 grafana_smtp_skip_verify: false
+
+# External monitor SMTP configuration
+external_monitor_smtp_host: "smtp.example.com:587" # Alert Manager requires starttls on port 587 and doesn't cooperate with SMTPS on 465
+external_monitor_smtp_user: "externalmonitor@example.com"
+external_monitor_smtp_password: "mysecret"
+external_monitor_smtp_from_address: "externalmonitor@example.com"
+external_monitor_smtp_from_name: "External Monitor"
+external_monitor_smtp_skip_verify: false
+external_monitor_alert_email: "destination@example.com"

@@ -365,11 +365,27 @@
     state: unmounted
   when: not monitoring_managed.stat.exists
 
-- name: Allow Prometheus HTTP
+- name: Get external-monitor host IPs
+  ansible.builtin.set_fact:
+    external_monitor_ips: "{{ groups['all'] | 
+                            map('extract', hostvars) | 
+                            selectattr('host_roles', 'defined') | 
+                            selectattr('host_roles', 'contains', 'external-monitor') | 
+                            map(attribute='ansible_host') | 
+                            list }}"
+
+- name: Debug external monitor IPs
+  ansible.builtin.debug:
+    msg: "External monitor IPs: {{ external_monitor_ips }}"
+
+- name: Allow Prometheus HTTP from external monitor VPS
   community.general.ufw:
     rule: allow
     port: 9090
     proto: tcp
+    from_ip: "{{ item }}"
+  loop: "{{ external_monitor_ips }}"
+  when: external_monitor_ips | length > 0
   notify: Reload ufw
 
 - name: Allow Grafana HTTP
