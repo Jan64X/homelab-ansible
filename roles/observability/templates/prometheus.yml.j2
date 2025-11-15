@@ -43,6 +43,37 @@ scrape_configs:
       # Replace instance label with hostname for better readability
       - source_labels: [hostname]
         target_label: instance
+  
+  - job_name: 'fail2ban-exporter'
+    scrape_interval: 15s
+    metrics_path: /metrics
+    static_configs:
+{% for host in groups['all'] %}
+{% if hostvars[host]['ansible_host'] is defined and 'monitoring-hl' in hostvars[host].get('host_roles', []) %}
+      - targets: ['{{ hostvars[host]['ansible_host'] }}:9191']
+        labels:
+          service: 'fail2ban-exporter'
+          env: 'homelab'
+          hostname: '{{ hostvars[host].get('hostname', host) }}'
+{% endif %}
+{% endfor %}
+{% for host in groups['all'] %}
+{% if hostvars[host]['ansible_host'] is defined and 'monitoring-vps' in hostvars[host].get('host_roles', []) %}
+      - targets: ['{{ hostvars[host]['ansible_host'] }}:9191']
+        labels:
+          service: 'fail2ban-exporter'
+          env: 'vps'
+          hostname: '{{ hostvars[host].get('hostname', host) }}'
+{% endif %}
+{% endfor %}
+    relabel_configs:
+      # Preserve original instance (IP:port) as host_address
+      - source_labels: [__address__]
+        target_label: host_address
+      # Replace instance label with hostname for better readability
+      - source_labels: [hostname]
+        target_label: instance
+  
   - job_name: 'grafana'
     static_configs:
       - targets: ['grafana:3000']

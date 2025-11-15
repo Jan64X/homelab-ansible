@@ -36,3 +36,17 @@
     state: restarted
     enabled: true
   become: true
+
+- name: Start fail2ban_exporter
+  ansible.builtin.service:
+    name: fail2ban_exporter
+    state: started
+    enabled: true
+  become: true
+
+- name: Restart fail2ban_exporter
+  ansible.builtin.service:
+    name: fail2ban_exporter
+    state: restarted
+    enabled: true
+  become: true
