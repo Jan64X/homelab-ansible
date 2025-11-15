@@ -168,9 +168,9 @@
   ansible.posix.sysctl:
     name: "{{ sysctl_param.name }}"
     value: "{{ sysctl_param.value }}"
-    sysctl_set: yes
+    sysctl_set: true
     state: present
-    reload: yes
+    reload: true
     sysctl_file: /etc/sysctl.d/99-security.conf
   loop:
     # Network security
@@ -195,12 +195,137 @@
   loop_control:
     loop_var: sysctl_param
 
+- name: Disable uncommon network protocols
+  ansible.posix.sysctl:
+    name: "{{ item }}"
+    value: '1'
+    sysctl_set: true
+    state: present
+    reload: true
+    sysctl_file: /etc/sysctl.d/99-network-hardening.conf
+  loop:
+    - net.ipv4.conf.all.drop_gratuitous_arp
+    - net.ipv4.conf.default.drop_gratuitous_arp
+    - net.ipv4.conf.all.drop_unicast_in_l2_multicast
+    - net.ipv4.conf.default.drop_unicast_in_l2_multicast
+
+- name: Enable TCP hardening
+  ansible.posix.sysctl:
+    name: "{{ tcp_param.name }}"
+    value: "{{ tcp_param.value }}"
+    sysctl_set: true
+    state: present
+    reload: true
+    sysctl_file: /etc/sysctl.d/99-network-hardening.conf
+  loop:
+    - { name: 'net.ipv4.tcp_rfc1337', value: '1' }
+    - { name: 'net.ipv4.tcp_syn_retries', value: '5' }
+    - { name: 'net.ipv4.tcp_synack_retries', value: '2' }
+    - { name: 'net.ipv4.tcp_max_syn_backlog', value: '2048' }
+  loop_control:
+    loop_var: tcp_param
+
+- name: Apply ANSSI-BP-028 kernel hardening parameters
+  ansible.posix.sysctl:
+    name: "{{ anssi_param.name }}"
+    value: "{{ anssi_param.value }}"
+    sysctl_set: true
+    state: present
+    reload: true
+    sysctl_file: /etc/sysctl.d/99-anssi-hardening.conf
+  loop:
+    # Kernel hardening
+    - { name: 'kernel.kexec_load_disabled', value: '1' }
+    - { name: 'kernel.unprivileged_bpf_disabled', value: '1' }
+    - { name: 'kernel.unprivileged_userns_clone', value: '0' }
+    - { name: 'net.core.bpf_jit_harden', value: '2' }
+    # Restrict kernel logs
+    - { name: 'kernel.printk', value: '3 3 3 3' }
+    # Restrict perf events
+    - { name: 'kernel.perf_event_paranoid', value: '3' }
+    - { name: 'kernel.perf_cpu_time_max_percent', value: '1' }
+    - { name: 'kernel.perf_event_max_sample_rate', value: '1' }
+    # Filesystem protections
+    - { name: 'fs.protected_symlinks', value: '1' }
+    - { name: 'fs.protected_hardlinks', value: '1' }
+    - { name: 'fs.protected_fifos', value: '2' }
+    - { name: 'fs.protected_regular', value: '2' }
+    # Disable core dumps
+    - { name: 'fs.suid_dumpable', value: '0' }
+  loop_control:
+    loop_var: anssi_param
+
+- name: Disable core dumps system-wide
+  ansible.builtin.lineinfile:
+    path: /etc/security/limits.conf
+    line: "* hard core 0"
+    state: present
+
+- name: Ensure systemd coredump.conf.d directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/coredump.conf.d
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+
+- name: Disable core dumps in systemd
+  ansible.builtin.copy:
+    content: |
+      [Coredump]
+      Storage=none
+      ProcessSizeMax=0
+    dest: /etc/systemd/coredump.conf.d/disable-coredumps.conf
+    mode: '0644'
+    owner: root
+    group: root
+
 - name: Secure shared memory
   ansible.builtin.lineinfile:
     path: /etc/fstab
     line: "tmpfs /run/shm tmpfs defaults,noexec,nosuid 0 0"
     state: present
   when: ansible_facts['mounts'] | selectattr('mount', 'equalto', '/run/shm') | list | length == 0
+
+# HidePID - Hide process information from other users
+- name: Create proc group for process visibility
+  ansible.builtin.group:
+    name: proc
+    state: present
+    system: true
+
+- name: Add system users to proc group for process visibility
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: proc
+    append: true
+  loop:
+    - "{{ ansible_user }}"
+    - "{{ system_user }}"
+    - root
+
+- name: Configure /proc with hidepid in fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: '^proc\s+/proc\s+proc'
+    line: "proc /proc proc defaults,hidepid=2,gid=proc 0 0"
+    state: present
+  register: hidepid_fstab
+
+- name: Check current /proc mount options
+  ansible.builtin.shell: |
+    set -o pipefail
+    mount | grep "^proc on /proc" | grep -qE "(hidepid=2|hidepid=invisible)" && echo "configured" || echo "needs_remount"
+  args:
+    executable: /bin/bash
+  register: proc_mount_status
+  changed_when: false
+  failed_when: false
+
+- name: Remount /proc with hidepid
+  ansible.builtin.command: mount -o remount,hidepid=2,gid=proc /proc
+  when: proc_mount_status.stdout == "needs_remount"
+  changed_when: true
 
 - name: Set secure file permissions on critical files
   ansible.builtin.file:
@@ -229,6 +354,74 @@
     mode: '0644'
     owner: root
     group: root
+
+- name: Blacklist DMA-capable and vulnerable modules
+  ansible.builtin.copy:
+    content: |
+      # Disable USB storage (comment out if needed for legitimate use)
+      install usb-storage /bin/true
+      
+      # Disable Firewire (DMA attacks)
+      blacklist firewire-core
+      blacklist firewire-ohci
+      blacklist firewire-sbp2
+      
+      # Disable Thunderbolt (DMA attacks)
+      blacklist thunderbolt
+    dest: /etc/modprobe.d/blacklist-dma.conf
+    mode: '0644'
+    owner: root
+    group: root
+
+- name: Install AppArmor utilities
+  ansible.builtin.apt:
+    name:
+      - apparmor
+      - apparmor-utils
+      - apparmor-profiles
+      - apparmor-profiles-extra
+    state: present
+
+- name: Ensure AppArmor is enabled and running
+  ansible.builtin.service:
+    name: apparmor
+    state: started
+    enabled: true
+
+- name: Check AppArmor status
+  ansible.builtin.command: aa-status --json
+  register: apparmor_status
+  changed_when: false
+  failed_when: false
+
+- name: Set AppArmor profiles to enforce mode
+  ansible.builtin.command: aa-enforce /etc/apparmor.d/*
+  register: apparmor_enforce
+  changed_when: "'Setting' in apparmor_enforce.stdout"
+  failed_when: false
+  when: apparmor_status.rc == 0
+
+- name: Install auditd for security monitoring
+  ansible.builtin.apt:
+    name:
+      - auditd
+      - audispd-plugins
+    state: present
+
+- name: Configure auditd rules (ANSSI-BP-028)
+  ansible.builtin.template:
+    src: auditd-rules.j2
+    dest: /etc/audit/rules.d/anssi-bp-028.rules
+    mode: '0640'
+    owner: root
+    group: root
+  notify: Restart auditd
+
+- name: Ensure auditd is enabled and running
+  ansible.builtin.service:
+    name: auditd
+    state: started
+    enabled: true
 
 - name: Configure logrotate - optional, default config usually sufficient
   ansible.builtin.template:
@@ -310,5 +503,5 @@
 # Cleanup and maintenance
 - name: Remove unnecessary packages
   ansible.builtin.apt:
-    autoremove: yes
-    autoclean: yes
+    autoremove: true
+    autoclean: true

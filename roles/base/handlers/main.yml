@@ -18,6 +18,11 @@
     name: chrony
     state: restarted
 
+- name: Restart auditd
+  ansible.builtin.service:
+    name: auditd
+    state: restarted
+
 - name: Reload systemd
   ansible.builtin.systemd:
     daemon_reload: true
