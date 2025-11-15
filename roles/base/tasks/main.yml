@@ -505,3 +505,21 @@
   ansible.builtin.apt:
     autoremove: true
     autoclean: true
+
+# -----------------------------------------------------------------
+# Disable cloud-init to prevent re-configuration on reboot
+# -----------------------------------------------------------------
+
+- name: Check for cloud-init config file
+  ansible.builtin.stat:
+    path: /etc/cloud/cloud.cfg
+  register: cloud_init_config_file
+
+- name: Create cloud-init disable file
+  ansible.builtin.file:
+    path: /etc/cloud/cloud-init.disabled
+    state: touch
+    mode: '0644'
+    owner: root
+    group: root
+  when: cloud_init_config_file.stat.exists
