@@ -9,30 +9,19 @@ base_domain: example.com
 # Nginx Configuration for public-facing servers
 ssl_enabled: true
 cloudflare_enabled: true      # Set to false if not using Cloudflare
-nginx_ssl_cert_path: /etc/nginx/ssl/{{ base_domain }}.pem
-nginx_ssl_key_path: /etc/nginx/ssl/{{ base_domain }}.key
-nginx_ssl_client_cert_path: /etc/nginx/ssl/origin_ca_rsa_root.pem
 domain_name: "{{ base_domain }}"
-
-# SSL certificates to copy from NAS
-# Each certificate is copied from NAS path: /tank/Server/nginx/ssl/<src>
-nginx_ssl_certificates:
-  - src: "{{ base_domain }}.pem"
-    dest: "{{ nginx_ssl_cert_path }}"
-  - src: "{{ base_domain }}.key"
-    dest: "{{ nginx_ssl_key_path }}"
-  - src: "origin_ca_rsa_root.pem"
-    dest: "{{ nginx_ssl_client_cert_path }}"
+cloudflare_api_token: "yourkeyhere"
+certbot_email: "admin@example.com"
 
 # Nginx virtual hosts to configure
 # Each entry corresponds to a template file: templates/<name>.conf.j2
 nginx_vhosts:
   - search
-#  - gitlab # uncomment this and comment forgejo to use gitlab instead of forgejo
+  - forgejo
   - base_domain
   - sharkey
   - filescdn
-  - forgejo
+#  - gitlab
 
 # Service port mappings (ports exposed by each service)
 # Adjust these if your services use different ports
