@@ -33,3 +33,5 @@ TASK [forgejo : Add NAS mount to fstab] ****************************************
 [WARNING]: Deprecation warnings can be disabled by setting `deprecation_warnings=False` in ansible.cfg.
 [DEPRECATION WARNING]: Passing `warnings` to `exit_json` or `fail_json` is deprecated. This feature will be removed from ansible-core version 2.23. Use `AnsibleModule.warn` instead.
 ok: [forgejo]
+
+- edit sharkey role to be user@example.com instead of user@fedi.example.com
